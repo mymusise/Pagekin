@@ -45,6 +45,7 @@ export interface ProjectSqliteEvidence {
   preAssetDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
   preRecycleDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
   preContinuityDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
+  preAnnotationDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
 }
 
 function regular(file: string): void {
@@ -106,10 +107,11 @@ const quoteIdentifier = (value: string) => '"' + value.replaceAll('"', '""') + '
 const M05_ASSET_TABLES = ['character_avatar_assets', 'character_avatar_unresolved'] as const
 // 跨版本比对正文时，后来迁移加的表和列不算，M08 补的基线节点同理。
 function domainColumns(db: BetterSqlite3.Database, preIdentity = false, preAsset = false, preRecycle = preIdentity,
-  preContinuity = preRecycle): DomainColumns {
+  preContinuity = preRecycle, preAnnotation = preContinuity): DomainColumns {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[]
   const postLegacyTables = [...M02_AUXILIARY_TABLES, ...M03_REVIEW_CYCLE_TABLES, ...M05_ASSET_TABLES] as readonly string[]
-  return tables.filter(({ name }) => (!preIdentity || !postLegacyTables.includes(name))
+  return tables.filter(({ name }) => (!preAnnotation || name !== 'annotation_history')
+    && (!preIdentity || !postLegacyTables.includes(name))
     && (!preAsset || !(M05_ASSET_TABLES as readonly string[]).includes(name))
     && (!preContinuity || !(M08_TABLES as readonly string[]).includes(name))).map(({ name }) => ({ name,
     columns: (db.prepare(`PRAGMA table_info(${quoteIdentifier(name)})`).all() as { name: string }[]).map(column => column.name)
@@ -138,7 +140,8 @@ function inspect(db: BetterSqlite3.Database, registry: MigrationRegistry, target
     ...(result.version >= 3 ? { preIdentityDomain: domain(db, domainColumns(db, true)) } : {}),
     ...(result.version >= 6 ? { preAssetDomain: domain(db, domainColumns(db, false, true)) } : {}),
     ...(result.version >= 8 ? { preRecycleDomain: domain(db, domainColumns(db, false, false, true)) } : {}),
-    ...(result.version >= 9 ? { preContinuityDomain: domain(db, domainColumns(db, false, false, false, true)) } : {}) }
+    ...(result.version >= 9 ? { preContinuityDomain: domain(db, domainColumns(db, false, false, false, true)) } : {}),
+    ...(result.version >= 10 ? { preAnnotationDomain: domain(db, domainColumns(db, false, false, false, false, true)) } : {}) }
 }
 function qualifiedLegacySource(db: BetterSqlite3.Database): string | null {
   const adapter = new SqliteSchemaAdapter(db)

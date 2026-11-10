@@ -171,7 +171,7 @@ function DraftChapter({ tab, filePath, projectKey }: { tab: EditorTab; filePath:
                 hideStatusBar
                 onCharCountChange={setCharCount}
                 onChange={draft.onBodyChange}
-                onSave={body => draft.save(body)}
+                onSave={body => draft.save(body, true)}
               />
             </div>
           )}

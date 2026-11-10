@@ -13,6 +13,7 @@ export interface ProjectSqliteEvidence {
   preAssetDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
   preRecycleDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
   preContinuityDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
+  preAnnotationDomain?: { tableCounts: Record<string, number>; authorContentHash: string }
 }
 export interface ProjectAssetSourceEntry {
   readonly relativePath: string
@@ -273,7 +274,8 @@ export async function migrateProjectFormat<V, A = unknown>(options: {
       if (targetSchema.schemaVersion !== CURRENT_DESKTOP_SCHEMA_VERSION || !isDeepStrictEqual(
         journal.sourceSchema.schemaVersion < 3 ? targetSchema.preIdentityDomain
           : journal.sourceSchema.schemaVersion < 8 ? targetSchema.preRecycleDomain
-            : journal.sourceSchema.schemaVersion < 9 ? targetSchema.preContinuityDomain : targetSchema.domain,
+            : journal.sourceSchema.schemaVersion < 9 ? targetSchema.preContinuityDomain
+              : journal.sourceSchema.schemaVersion < 10 ? targetSchema.preAnnotationDomain : targetSchema.domain,
         journal.sourceSchema.domain,
       )) fail('PROJECT_MIGRATION_SQLITE_CONTENT_CHANGED')
       checkpoint('sqlite-backed-up')
