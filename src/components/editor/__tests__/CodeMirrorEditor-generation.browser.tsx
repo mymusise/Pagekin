@@ -53,7 +53,10 @@ beforeEach(async () => {
     activeRequests: new Map(),
   })
   const recoveries = new Map<string, unknown>()
+  const history: unknown[] = []
   invoke = vi.fn(async (channel: string, ...args: unknown[]) => {
+    if (channel === 'db:annotation-history-list') return history
+    if (channel === 'db:annotation-history-record') { history.unshift({ ...(args[0] as object), id: history.length + 1, createdAt: '2026-01-01 12:00:00' }); return { success: true } }
     if (channel === 'editor-inline:begin') {
       leaseRequestCount += 1
       if (deferFirstLease && leaseRequestCount === 1) return new Promise((_resolve, reject) => { rejectFirstLease = reject })
@@ -252,6 +255,51 @@ describe('CodeMirror editor AI generation boundary', () => {
     await expect.element(page.getByRole('region', { name: '本章批注' })).not.toBeInTheDocument()
   })
 
+  it('persists an accepted annotation revision and restores its before version', async () => {
+    deferStream = true
+    const save = vi.fn(async () => {})
+    await act(async () => root.render(<CodeMirrorEditor content="林岚走进北塔" filePath="ai-novel://draft/1" mode="prose" onSave={save} />))
+    const view = EditorView.findFromDOM(container.querySelector('.cm-editor')!)!
+    await selectLine('林岚走进北塔')
+    await act(async () => page.getByRole('button', { name: '添加批注' }).click())
+    await act(async () => page.getByRole('textbox', { name: '批注意见' }).fill('改成第一人称'))
+    await act(async () => page.getByRole('button', { name: '添加批注' }).click())
+    await act(async () => page.getByRole('button', { name: '统一修改（1）' }).click())
+    await act(async () => listeners.get('llm:stream-done')?.({ requestId: pendingRequestId!, fullText: '我走进北塔', finishReason: 'stop' } as never))
+    await expect.element(page.getByText('我走进北塔')).toBeVisible()
+    await act(async () => page.getByRole('button', { name: '替换' }).click())
+    await vi.waitFor(() => expect(view.state.doc.toString()).toBe('我走进北塔'))
+    expect(save).toHaveBeenCalledWith('我走进北塔')
+    expect(invoke).toHaveBeenCalledWith('db:annotation-history-record', expect.objectContaining({ before: '林岚走进北塔', after: '我走进北塔', annotations: [expect.objectContaining({ instruction: '改成第一人称' })] }), expect.any(String), expect.any(Object))
+    await act(async () => page.getByText('批注修改历史（1）').click())
+    await act(async () => page.getByText(/2026-01-01/).click())
+    expect(container.querySelector('.cm-history-diff ins')?.textContent).toContain('我')
+    expect(container.querySelector('.cm-history-diff del')?.textContent).toContain('林岚')
+    await act(async () => page.getByRole('button', { name: '回滚到修改前' }).click())
+    await act(async () => page.getByRole('button', { name: '确认回滚' }).click())
+    await vi.waitFor(() => expect(view.state.doc.toString()).toBe('林岚走进北塔'))
+    expect(save).toHaveBeenCalledWith('林岚走进北塔')
+  })
+
+  it('keeps the original text when saving annotation history fails', async () => {
+    deferStream = true
+    const originalInvoke = invoke.getMockImplementation() as (channel: string, ...args: unknown[]) => unknown
+    invoke.mockImplementation(async (channel: string, ...args: unknown[]) => channel === 'db:annotation-history-record'
+      ? { success: false, error: 'storage failed' } : originalInvoke(channel, ...args))
+    await act(async () => root.render(<CodeMirrorEditor content="林岚走进北塔" filePath="ai-novel://draft/1" mode="prose" />))
+    const view = EditorView.findFromDOM(container.querySelector('.cm-editor')!)!
+    await selectLine('林岚走进北塔')
+    await act(async () => page.getByRole('button', { name: '添加批注' }).click())
+    await act(async () => page.getByRole('textbox', { name: '批注意见' }).fill('改成第一人称'))
+    await act(async () => page.getByRole('button', { name: '添加批注' }).click())
+    await act(async () => page.getByRole('button', { name: '统一修改（1）' }).click())
+    await act(async () => listeners.get('llm:stream-done')?.({ requestId: pendingRequestId!, fullText: '我走进北塔', finishReason: 'stop' } as never))
+    await expect.element(page.getByText('我走进北塔')).toBeVisible()
+    await act(async () => page.getByRole('button', { name: '替换' }).click())
+    await expect.element(page.getByText('无法保存批注历史，未替换正文')).toBeVisible()
+    expect(view.state.doc.toString()).toBe('林岚走进北塔')
+  })
+
   it('adds the note with Ctrl+Enter and returns to the actions with Escape', async () => {
     await act(async () => root.render(
       <CodeMirrorEditor content="林岚走进北塔" mode="prose" />,
@@ -345,6 +393,26 @@ describe('CodeMirror editor AI generation boundary', () => {
   })
 
   const LONG_CHAPTER = Array.from({ length: 60 }, (_, i) => `第${i + 1}段原文`).join('\n\n')
+
+  it('keeps a batch preview visible when the chapter start is outside the viewport', async () => {
+    deferStream = true
+    await act(async () => root.render(
+      <div data-testid="chapter-scroller" style={{ height: 300, overflow: 'auto' }}><CodeMirrorEditor content={LONG_CHAPTER} mode="prose" fitContent /></div>,
+    ))
+    const view = EditorView.findFromDOM(container.querySelector('.cm-editor')!)!
+    await act(async () => view.dispatch({ effects: EditorView.scrollIntoView(view.state.doc.length, { y: 'end' }) }))
+    await nextFrames()
+    await selectLine('第60段原文', { exact: true })
+    await act(async () => page.getByRole('button', { name: '添加批注' }).click())
+    await act(async () => page.getByRole('textbox', { name: '批注意见' }).fill('修改结尾'))
+    await act(async () => page.getByRole('button', { name: '添加批注' }).click())
+    await act(async () => page.getByRole('button', { name: '统一修改（1）' }).click())
+    await nextFrames()
+    await expect.element(page.getByText('批量批注修改预览')).toBeVisible()
+    await act(async () => listeners.get('llm:stream-done')?.({ requestId: pendingRequestId!, fullText: '修改后的章节', finishReason: 'stop' } as never))
+    await expect.element(page.getByText('修改后的章节')).toBeVisible()
+    await expect.element(page.getByRole('button', { name: '替换' })).toBeVisible()
+  })
   const scrollChapterTo = async (scrollTop: number) => {
     const scroller = container.querySelector<HTMLElement>('[data-testid="chapter-scroller"]')!
     await act(async () => {
@@ -538,7 +606,7 @@ it.each([false, true])('明确 handle 恢复原候选；文件改变=%s 时只�
   const view = EditorView.findFromDOM(container.querySelector('.cm-editor')!)!
   expect(view.state.doc.toString()).toBe(changedFile ? documentText : '甲替换表情乙')
   if (changedFile) await expect.element(page.getByText('正文或原目标已变化，结果未应用；你仍可复制预览内容')).toBeVisible()
-  expect(invoke).toHaveBeenCalledTimes(2)
+  expect(invoke.mock.calls.filter(([channel]) => channel.startsWith('editor-inline:'))).toHaveLength(2)
 })
 
 it('明确 handle 恢复按意见改的候选时显示当时的意见', async () => {

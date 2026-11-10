@@ -765,6 +765,21 @@
   padding: var(--s-3);
 }
 
+.paper-ink.cm-selbar[data-batch-preview] {
+  transform: translate(-50%, -50%);
+}
+
+.cm-selbar[data-batch-preview] .cm-selbar-preview {
+  width: min(640px, calc(100vw - 48px));
+  max-height: 70vh;
+}
+
+.cm-selbar[data-batch-preview] .cm-selbar-actions {
+  position: sticky;
+  bottom: 0;
+  background: var(--surface);
+}
+
 .cm-selbar .cm-selbar-tool {
   height: 32px;
   font-size: var(--fs-13);
@@ -956,3 +971,16 @@
   font-size: var(--fs-12);
   color: var(--ink-3);
 }
+
+.cm-annotation-history {
+  margin: var(--s-4) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+.cm-annotation-history-entry { margin: var(--s-3) 0; }
+.cm-history-diff { max-height: 24rem; overflow: auto; white-space: pre-wrap; }
+.cm-history-diff ins { color: var(--ok); background: var(--ok-soft); text-decoration: none; }
+.cm-history-diff del { color: var(--danger); text-decoration: line-through; }
+.cm-history-added { color: var(--ok); }
+.cm-history-removed { color: var(--danger); }

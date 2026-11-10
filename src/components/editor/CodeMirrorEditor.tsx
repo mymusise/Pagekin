@@ -21,6 +21,10 @@ import { displayedErrorMessage } from '../../i18n/app-errors'
 import { isTerminalProviderFailure } from '../../services/generation/generation-harness'
 import { getActiveProjectSessionContext } from '../../shared/project-session-context'
 import { livePreview, paperHeadFacet, type PaperHead } from './live-preview'
+import { ipc } from '../../services/ipc-client'
+import { parseResourceUri } from '../../shared/project-paths'
+import { diffProse } from '../stage/history/version-diff'
+import type { AnnotationHistoryEntry, AnnotationHistoryInput } from '../../shared/editor-inline-generation'
 import { commandKeyLabel, isComposing } from '../stage/shortcut-keys'
 
 export type CodeMirrorEditorProps = {
@@ -96,6 +100,32 @@ export default function CodeMirrorEditor({
   const [noteDraft, setNoteDraft] = useState<string | null>(null)
   const [noteError, setNoteError] = useState<string | null>(null)
   const [annotations, setAnnotations] = useState<EditorInlineAnnotation[]>([])
+  const [annotationHistory, setAnnotationHistory] = useState<AnnotationHistoryEntry[]>([])
+  const [historyError, setHistoryError] = useState('')
+  const [historyKey, setHistoryKey] = useState('')
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [restoreTarget, setRestoreTarget] = useState<{ entry: AnnotationHistoryEntry; side: 'before' | 'after'; key: string } | null>(null)
+  const historyResource = filePath ? parseResourceUri(filePath) : null
+  const historyDraftId = historyResource?.kind === 'draft' ? historyResource.id : null
+  const historySession = getActiveProjectSessionContext()
+  const historySessionKey = historySession ? JSON.stringify(historySession) : ''
+  const refreshHistory = useCallback(async () => {
+    const session = getActiveProjectSessionContext()
+    if (!session || historyDraftId === null) return
+    try {
+      const records = await ipc.invokeWithProjectSession(session, 'db:annotation-history-list', historyDraftId, session.projectPath)
+      if (JSON.stringify(getActiveProjectSessionContext()) === JSON.stringify(session)) { setAnnotationHistory(records); setHistoryKey(`${session.leaseId}:${historyDraftId}`); setHistoryError('') }
+    } catch { setHistoryError(uiText('批注历史读取失败', 'Could not load annotation history')) }
+  }, [historyDraftId, uiText])
+  useEffect(() => { void Promise.resolve().then(refreshHistory) }, [refreshHistory, historySessionKey])
+  const visibleHistory = historyKey === `${historySession?.leaseId}:${historyDraftId}` ? annotationHistory : []
+  const recordHistory = async (before: string, after: string, notes: EditorInlineAnnotation[]) => {
+    const session = getActiveProjectSessionContext()
+    if (!session || historyDraftId === null) throw new Error('ANNOTATION_HISTORY_UNAVAILABLE')
+    const entry: AnnotationHistoryInput = { draftId: historyDraftId, before, after, annotations: notes }
+    const result = await ipc.invokeWithProjectSession(session, 'db:annotation-history-record', entry, session.projectPath)
+    if (!result.success || JSON.stringify(session) !== JSON.stringify(getActiveProjectSessionContext())) throw new Error('ANNOTATION_HISTORY_SAVE_FAILED')
+  }
   const hasEmittedInitialCount = useRef(false)
   const composingRef = useRef(false)
   const pendingExternalContentRef = useRef<string | null>(null)
@@ -153,6 +183,7 @@ export default function CodeMirrorEditor({
   const [aiResult, setAiResult] = useState<string | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [activeAIAction, setActiveAIAction] = useState<string | null>(null)
+  const [activeActionKey, setActiveActionKey] = useState<EditorInlineRequest['action'] | null>(null)
   const [activeNote, setActiveNote] = useState<string | null>(null)
   const [bubbleSize, setBubbleSize] = useState({ width: 0, height: 0 })
   const bubbleRef = useCallback((node: HTMLDivElement | null) => {
@@ -172,6 +203,7 @@ export default function CodeMirrorEditor({
   const aiTargetRef = useRef<{
     requestSequence: number
     action: EditorInlineRequest['action']
+    annotations?: EditorInlineAnnotation[]
     from: number
     to: number
     selectedText: string
@@ -207,6 +239,7 @@ export default function CodeMirrorEditor({
       const applicable = latest?.status === 'completed' && latest.compositionEligible === true && recovery.view.status !== 'cancelled' && recovery.sourceStatus === 'current'
       setAiError(applicable ? null : uiText('恢复的候选尚不可应用，可复制或继续原运行', 'The recovered candidate cannot be applied yet; copy it or continue the original run.'))
       setCanResumeAI(recovery.sourceStatus === 'current' && recovery.view.status !== 'cancelled' && recovery.view.ledger?.physicalRequests === 0 && candidates.length === 0)
+      setActiveActionKey(target.action)
       setActiveAIAction(uiText(...actionLabel(target.action)))
       setActiveNote(target.action === 'instruct' ? target.instruction : target.action === 'batch-instruct' ? uiText(`共 ${target.annotations.length} 条批注`, `${target.annotations.length} annotations`) : null)
       const view = editorRef.current?.view
@@ -263,9 +296,11 @@ export default function CodeMirrorEditor({
     }
   }, [onChange, onCharCountChange, aiResult])
 
+  const batchPreview = aiResult !== null && activeActionKey === 'batch-instruct'
+
   // 监听滚动与缩放，实时更新 Bubble Menu 坐标
   useEffect(() => {
-    if (!bubbleOpen || !selectionRange || !editorRef.current?.view) return;
+    if (batchPreview || !bubbleOpen || !selectionRange || !editorRef.current?.view) return;
 
     const view = editorRef.current.view;
     // 随内容长高时滚动的是外层页面，选区是否还在可见范围要按那个滚动容器算。
@@ -318,7 +353,7 @@ export default function CodeMirrorEditor({
       window.removeEventListener('resize', onScrollOrResize)
       if (rafId) cancelAnimationFrame(rafId)
     }
-  }, [bubbleOpen, selectionRange, fitContent])
+  }, [bubbleOpen, selectionRange, fitContent, batchPreview])
 
   // 主题配置
   const cmTheme = useMemo(() => EditorView.theme({
@@ -455,6 +490,7 @@ export default function CodeMirrorEditor({
       const client = createEditorInlineGeneration(session)
       inlineRef.current = client
       aiCandidateRef.current = null
+      setActiveActionKey(request.action)
       setActiveAIAction(uiText(...actionLabel(request.action)))
       setActiveNote(request.action === 'instruct' ? request.instruction : request.action === 'batch-instruct' ? uiText(`共 ${request.annotations.length} 条批注`, `${request.annotations.length} annotations`) : null)
       setNoteDraft(null); setAiResult(''); setAiError(null); setCanResumeAI(false)
@@ -532,10 +568,27 @@ export default function CodeMirrorEditor({
         ))
         return
       }
+      if (target.action === 'batch-instruct' && historyDraftId !== null) {
+        setHistoryBusy(true)
+        try {
+          await recordHistory(target.documentText, aiResult, target.annotations ?? [])
+          if (view.state.doc.toString() !== target.documentText || target.sessionKey !== JSON.stringify(getActiveProjectSessionContext())) {
+            setAiError(uiText('正文已变化，未替换；修改记录已保存供参考', 'The document changed; the revision was not applied. Its record was saved for reference.'))
+            return
+          }
+          void refreshHistory()
+        } catch {
+          setAiError(uiText('无法保存批注历史，未替换正文', 'Could not save annotation history; the text was not replaced.'))
+          return
+        } finally { setHistoryBusy(false) }
+      }
       view.dispatch({
         changes: { from: target.from, to: target.to, insert: aiResult }
       })
-      if (target.action === 'batch-instruct') setAnnotations([])
+      if (target.action === 'batch-instruct') {
+        setAnnotations([])
+        try { await onSave?.(view.state.doc.toString()) } catch { setHistoryError(uiText('修改已显示，但正文保存失败，请重试保存', 'The revision is visible, but saving failed. Try saving again.')) }
+      }
     }
     aiTargetRef.current = null
     setAiResult(null)
@@ -672,7 +725,7 @@ export default function CodeMirrorEditor({
       </div>
 
       {/* 选区工具条：纸墨浮层，自带纸墨令牌与深浅色 */}
-      {bubbleOpen && (editable || aiResult !== null) && bubblePos.top !== 0 && (
+      {(batchPreview || (bubbleOpen && (editable || aiResult !== null) && bubblePos.top !== 0)) && (
         <div
           ref={bubbleRef}
           role="toolbar"
@@ -680,7 +733,8 @@ export default function CodeMirrorEditor({
           className="paper-ink cm-selbar"
           data-theme={inkThemeName}
           data-preview={aiResult !== null || undefined}
-          style={{ top: bubbleTop, left: bubbleLeft }}
+          data-batch-preview={batchPreview || undefined}
+          style={batchPreview ? { top: '50%', left: '50%' } : { top: bubbleTop, left: bubbleLeft }}
           onMouseDown={(e) => { if (!(e.target instanceof HTMLTextAreaElement)) e.preventDefault() }}
         >
           {aiResult !== null ? (
@@ -708,7 +762,7 @@ export default function CodeMirrorEditor({
                 <Button
                   variant="primary"
                   size="sm"
-                  disabled={aiResult === '' || aiError !== null}
+                  disabled={aiResult === '' || aiError !== null || historyBusy}
                   onClick={handleAcceptAI}
                 ><Check size={13} aria-hidden="true" />{uiText('替换', 'Replace')}</Button>
               </div>
@@ -777,6 +831,48 @@ export default function CodeMirrorEditor({
             </>
           )}
         </div>
+      )}
+
+      {historyDraftId !== null && (
+        <details className="paper-ink cm-annotation-history">
+          <summary>{uiText(`批注修改历史（${visibleHistory.length}）`, `Annotation revision history (${visibleHistory.length})`)}</summary>
+          {historyError && <p role="alert">{historyError}</p>}
+          {visibleHistory.length === 0 && <p>{uiText('采用批注修改后会保留修改前后正文和意见。', 'Accepted annotation revisions keep the before and after text and notes.')}</p>}
+          {visibleHistory.map(entry => {
+            const diff = diffProse(entry.before, entry.after)
+            const excerpts = diff.paragraphs.flat().filter(part => part.kind !== 'same').slice(0, 2)
+            return <details key={entry.id} className="cm-annotation-history-entry">
+              <summary>{entry.createdAt} · {entry.annotations.length ? uiText(`${entry.annotations.length} 条批注`, `${entry.annotations.length} annotations`) : uiText('回滚', 'Restore')} · <span className="cm-history-added">+{diff.added}</span> / <span className="cm-history-removed">−{diff.removed}</span> {excerpts.map((part, index) => part.kind === 'added' ? <ins key={index} className="cm-history-added">{part.text.slice(0, 60)}</ins> : <del key={index} className="cm-history-removed">{part.text.slice(0, 60)}</del>)}</summary>
+              {entry.annotations.map(note => <p key={note.id}><b>{note.selectedText}</b>：{note.instruction}</p>)}
+              <div className="cm-history-diff" aria-label={uiText('修改差异：红色删除，绿色新增', 'Changes: red removed, green added')}>
+                {diff.paragraphs.map((paragraph, index) => <p key={index}>{paragraph.map((part, i) => part.kind === 'added' ? <ins key={i}>{part.text}</ins> : part.kind === 'removed' ? <del key={i}>{part.text}</del> : <span key={i}>{part.text}</span>)}</p>)}
+              </div>
+              {editable && <div className="cm-annotations-foot">
+                <Button variant="secondary" size="sm" disabled={historyBusy} onClick={() => setRestoreTarget({ entry, side: 'before', key: `${historySessionKey}:${historyDraftId}` })}>{uiText('回滚到修改前', 'Restore before')}</Button>
+                <Button variant="secondary" size="sm" disabled={historyBusy} onClick={() => setRestoreTarget({ entry, side: 'after', key: `${historySessionKey}:${historyDraftId}` })}>{uiText('回滚到修改后', 'Restore after')}</Button>
+              </div>}
+            </details>
+          })}
+          {restoreTarget && restoreTarget.key === `${historySessionKey}:${historyDraftId}` && visibleHistory.some(entry => entry.id === restoreTarget.entry.id) && <div role="group" aria-label={uiText('确认回滚', 'Confirm restore')}>
+            <p>{uiText('回滚会替换当前正文，并保留当前内容作为新的历史记录。', 'Restoring replaces the current text and keeps it in a new history record.')}</p>
+            <Button variant="secondary" size="sm" onClick={() => setRestoreTarget(null)}>{uiText('取消', 'Cancel')}</Button>
+            <Button variant="primary" size="sm" disabled={historyBusy} onClick={() => void (async () => {
+              const view = editorRef.current?.view
+              if (!view) return
+              const before = view.state.doc.toString()
+              const after = restoreTarget.entry[restoreTarget.side]
+              setHistoryBusy(true)
+              try {
+                await recordHistory(before, after, [])
+                if (view.state.doc.toString() !== before || restoreTarget.key !== `${JSON.stringify(getActiveProjectSessionContext())}:${historyDraftId}`) { setHistoryError(uiText('正文已变化，未回滚；记录已保存。', 'The text changed; it was not restored. The record was saved.')); return }
+                view.dispatch({ changes: { from: 0, to: before.length, insert: after } })
+                setAnnotations([]); setRestoreTarget(null); void refreshHistory()
+                try { await onSave?.(after) } catch { setHistoryError(uiText('回滚已显示，但正文保存失败，请重试保存', 'The restore is visible, but saving failed. Try saving again.')) }
+              } catch { setHistoryError(uiText('无法保存回滚记录，正文未更改', 'Could not save the restore record; text was not changed.')) }
+              finally { setHistoryBusy(false) }
+            })()}>{uiText('确认回滚', 'Confirm restore')}</Button>
+          </div>}
+        </details>
       )}
 
       {editable && aiResult === null && annotations.length > 0 && (

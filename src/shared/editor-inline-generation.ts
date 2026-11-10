@@ -40,3 +40,14 @@ export interface EditorInlineGenerationChannels {
   'editor-inline:execute': { args: [{ handle: MainGenerationRunHandle }]; return: MainGenerationExecuteReceipt }
   'editor-inline:cancel': { args: [{ handle: MainGenerationRunHandle }]; return: MainGenerationRunView }
 }
+
+export interface AnnotationHistoryInput {
+  draftId: number
+  before: string
+  after: string
+  annotations: EditorInlineAnnotation[]
+}
+export interface AnnotationHistoryEntry extends AnnotationHistoryInput {
+  id: number
+  createdAt: string
+}
